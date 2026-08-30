@@ -50,12 +50,12 @@ hyprsunset-solar --status
 Output:
 ```text
 --- hyprsunset-solar Status ---
-Location:           Winter Garden, Florida (28.5423, -81.5911)
+Location:           Washington, District of Columbia (38.9072, -77.0369)
 Current Local Time: 2026-08-30 14:00:11
-Dawn (Civil):       06:39:08
-Sunrise:            07:03:13
-Sunset:             19:51:22
-Dusk (Civil):       20:15:28
+Dawn (Civil):       06:08:42
+Sunrise:            06:36:15
+Sunset:             19:46:18
+Dusk (Civil):       20:13:51
 Solar Phase:        DAY
 Target Temperature: 6500K
 Actual hyprsunset:  6500K
