@@ -410,24 +410,33 @@ def print_status(args):
 def main():
     parser = argparse.ArgumentParser(description="Astronomical solar nightlight daemon for hyprsunset")
     parser.add_argument("--status", action="store_true", help="Show current solar times, phase, and temperature status")
+    parser.add_argument("--force", action="store_true", help="Force immediate reset of manual overrides and apply solar target")
+    parser.add_argument("--daemon", action="store_true", help="Run in continuous background daemon mode")
     parser.add_argument("--day-temp", type=int, default=DEFAULT_DAY_TEMP, help=f"Daytime color temperature (default: {DEFAULT_DAY_TEMP}K)")
     parser.add_argument("--night-temp", type=int, default=DEFAULT_NIGHT_TEMP, help=f"Nighttime color temperature (default: {DEFAULT_NIGHT_TEMP}K)")
     parser.add_argument("--transition-mins", type=int, default=DEFAULT_TRANSITION_MINUTES, help=f"Transition window in minutes (default: {DEFAULT_TRANSITION_MINUTES}m)")
     parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_SECONDS, help=f"Check interval in seconds (default: {DEFAULT_INTERVAL_SECONDS}s)")
     parser.add_argument("--lat", type=float, default=None, help="Latitude override")
     parser.add_argument("--lon", type=float, default=None, help="Longitude override")
-    parser.add_argument("--force", action="store_true", help="Force immediate reset of manual overrides")
 
     args = parser.parse_args()
 
     if args.force:
         save_state({})
-        print("[solar-nightlight] Reset state and manual overrides.")
+        print("[solar-nightlight] Reset manual override. Applying current solar target...")
+        loc = get_location(args.lat, args.lon)
+        phase, target_temp, _ = calculate_current_target(
+            loc["lat"], loc["lon"], args.day_temp, args.night_temp, args.transition_mins
+        )
+        apply_temperature(target_temp)
+        print(f"[solar-nightlight] Applied {target_temp}K ({phase}).")
+        sys.exit(0)
 
     if args.status:
         print_status(args)
-    else:
-        run_daemon(args)
+        sys.exit(0)
+
+    run_daemon(args)
 
 
 if __name__ == "__main__":
