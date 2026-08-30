@@ -9,7 +9,7 @@ Item {
 
   Process {
     id: daemonProc
-    command: ["python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/sunshine144.hyprsunset-solar/bin/hyprsunset-solar"]
+    command: ["python3", Quickshell.env("HOME") + "/.config/omarchy/plugins/sunshine144.solar-nightlight/bin/solar-nightlight"]
     running: true
 
     onExited: function(exitCode) {

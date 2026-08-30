@@ -1,11 +1,11 @@
 {
   "schemaVersion": 1,
-  "id": "sunshine144.hyprsunset-solar",
-  "name": "Hyprsunset Solar",
+  "id": "sunshine144.solar-nightlight",
+  "name": "Solar Nightlight",
   "version": "1.0.0",
   "author": "sunshine144",
   "license": "MIT",
-  "homepage": "https://github.com/sunshine144/hyprsunset-solar",
+  "homepage": "https://github.com/sunshine144/solar-nightlight",
   "description": "Astronomical solar nightlight scheduler daemon for hyprsunset with NOAA solar calculation math and smooth cosine transitions",
   "kinds": [
     "service"

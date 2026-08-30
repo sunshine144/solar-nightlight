@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-hyprsunset-solar - Astronomical Solar Nightlight Daemon for Hyprland / Omarchy
+solar-nightlight - Astronomical Solar Nightlight Daemon for Hyprland / Omarchy
 Calculates real-time sunrise, sunset, and twilight times based on geolocation
 and smoothly shifts hyprsunset color temperature between day and night.
 """
@@ -16,8 +16,8 @@ import urllib.request
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-CONFIG_DIR = Path.home() / ".config" / "hyprsunset-solar"
-CACHE_DIR = Path.home() / ".cache" / "hyprsunset-solar"
+CONFIG_DIR = Path.home() / ".config" / "solar-nightlight"
+CACHE_DIR = Path.home() / ".cache" / "solar-nightlight"
 LOCATION_CACHE_FILE = CACHE_DIR / "location.json"
 STATE_FILE = CACHE_DIR / "state.json"
 
@@ -48,7 +48,7 @@ def fetch_ip_location():
     ]
     for ep in endpoints:
         try:
-            req = urllib.request.Request(ep, headers={"User-Agent": "hyprsunset-solar/1.0"})
+            req = urllib.request.Request(ep, headers={"User-Agent": "solar-nightlight/1.0"})
             with urllib.request.urlopen(req, timeout=5) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
                 if "lat" in data and "lon" in data:
@@ -324,8 +324,8 @@ def run_daemon(args):
     lat = loc["lat"]
     lon = loc["lon"]
 
-    print(f"[hyprsunset-solar] Running with location: {loc.get('city', 'Unknown')}, {loc.get('region', '')} ({lat:.4f}, {lon:.4f})")
-    print(f"[hyprsunset-solar] Config: Day={args.day_temp}K, Night={args.night_temp}K, Transition={args.transition_mins}m, Interval={args.interval}s")
+    print(f"[solar-nightlight] Running with location: {loc.get('city', 'Unknown')}, {loc.get('region', '')} ({lat:.4f}, {lon:.4f})")
+    print(f"[solar-nightlight] Config: Day={args.day_temp}K, Night={args.night_temp}K, Transition={args.transition_mins}m, Interval={args.interval}s")
 
     state = load_state()
     override_active = state.get("override_active", False)
@@ -346,14 +346,14 @@ def run_daemon(args):
             if current_actual_temp is not None and last_set_temp is not None:
                 if abs(current_actual_temp - last_set_temp) > 80:
                     if not override_active:
-                        print(f"[hyprsunset-solar] Detected manual override to {current_actual_temp}K (phase: {phase}). Auto-adjustment paused.")
+                        print(f"[solar-nightlight] Detected manual override to {current_actual_temp}K (phase: {phase}). Auto-adjustment paused.")
                         override_active = True
                         override_phase = phase
 
             # If override is active, check if solar phase has changed to reset it
             if override_active:
                 if override_phase and phase != override_phase:
-                    print(f"[hyprsunset-solar] Phase changed from {override_phase} to {phase}. Clearing manual override.")
+                    print(f"[solar-nightlight] Phase changed from {override_phase} to {phase}. Clearing manual override.")
                     override_active = False
                     override_phase = None
                 else:
@@ -364,7 +364,7 @@ def run_daemon(args):
             if current_actual_temp is None or abs(current_actual_temp - target_temp) >= 20:
                 if apply_temperature(target_temp):
                     last_set_temp = target_temp
-                    print(f"[hyprsunset-solar] Applied {target_temp}K (Phase: {phase})")
+                    print(f"[solar-nightlight] Applied {target_temp}K (Phase: {phase})")
 
             save_state({
                 "override_active": override_active,
@@ -376,7 +376,7 @@ def run_daemon(args):
             })
 
         except Exception as err:
-            print(f"[hyprsunset-solar] Error in loop tick: {err}", file=sys.stderr)
+            print(f"[solar-nightlight] Error in loop tick: {err}", file=sys.stderr)
 
         time.sleep(args.interval)
 
@@ -394,7 +394,7 @@ def print_status(args):
     current_actual = get_hyprsunset_temp()
     state = load_state()
 
-    print("--- hyprsunset-solar Status ---")
+    print("--- solar-nightlight Status ---")
     print(f"Location:           {loc.get('city', 'Unknown')}, {loc.get('region', '')} ({lat:.4f}, {lon:.4f})")
     print(f"Current Local Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}")
     print(f"Dawn (Civil):       {times['dawn'].astimezone(local_tz).strftime('%H:%M:%S') if times['dawn'] else 'N/A'}")
@@ -422,7 +422,7 @@ def main():
 
     if args.force:
         save_state({})
-        print("[hyprsunset-solar] Reset state and manual overrides.")
+        print("[solar-nightlight] Reset state and manual overrides.")
 
     if args.status:
         print_status(args)

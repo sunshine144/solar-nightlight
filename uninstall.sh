@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-echo "==> Uninstalling hyprsunset-solar..."
+echo "==> Uninstalling solar-nightlight..."
 
-systemctl --user disable --now hyprsunset-solar.service 2>/dev/null || true
-rm -f ~/.config/systemd/user/hyprsunset-solar.service
-rm -f ~/.local/bin/hyprsunset-solar
+systemctl --user disable --now solar-nightlight.service 2>/dev/null || true
+rm -f ~/.config/systemd/user/solar-nightlight.service
+rm -f ~/.local/bin/solar-nightlight
 systemctl --user daemon-reload
 
-echo "==> hyprsunset-solar successfully uninstalled."
+echo "==> solar-nightlight successfully uninstalled."

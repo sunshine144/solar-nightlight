@@ -1,8 +1,8 @@
-# hyprsunset-solar
+# Solar Nightlight ☀️
 
 > **Astronomical solar nightlight daemon for `hyprsunset` on Hyprland & Omarchy Linux.**
 
-`hyprsunset-solar` dynamically calculates your real-world astronomical sunrise, sunset, and civil twilight times based on your local geolocation, and smoothly eases screen color temperature between crisp daylight (`6500K`) and warm nightlight (`4000K`).
+`solar-nightlight` dynamically calculates your real-world astronomical sunrise, sunset, and civil twilight times based on your local geolocation, and smoothly eases screen color temperature between crisp daylight (`6500K`) and warm nightlight (`4000K`).
 
 Written in pure standard-library Python 3 with **zero external dependencies**.
 
@@ -11,7 +11,7 @@ Written in pure standard-library Python 3 with **zero external dependencies**.
 ## Features
 
 - ☀️ **Astronomical Solar Calculations**: Pure implementation of NOAA solar position equations calculating daily solar declination, civil dawn/dusk, and sunrise/sunset.
-- 🌍 **Auto-Geolocation with Offline Caching**: Automatically discovers local coordinates via IP on initial run and caches locally in `~/.cache/hyprsunset-solar/location.json` for 100% offline reliability.
+- 🌍 **Auto-Geolocation with Offline Caching**: Automatically discovers local coordinates via IP on initial run and caches locally in `~/.cache/solar-nightlight/location.json` for 100% offline reliability.
 - 🌊 **Smooth Cosine Transition**: Gently ramps color temperature over a 45-minute window during dawn and dusk using smoothstep easing, eliminating jarring screen color jumps.
 - 🔄 **Self-Healing IPC**: Continuously tests `hyprsunset` socket connectivity. Automatically cleans up stale or orphaned processes after Hyprland compositor reloads or sleep/wake cycles.
 - 🎛️ **Manual Override Aware**: Respects manual temperature adjustments made via the Omarchy bar, `omarchy toggle nightlight`, or custom keybindings until the next solar phase transition.
@@ -26,14 +26,14 @@ Written in pure standard-library Python 3 with **zero external dependencies**.
 Install and enable directly via Omarchy's plugin manager:
 
 ```bash
-omarchy plugin add https://github.com/sunshine144/hyprsunset-solar --enable
+omarchy plugin add https://github.com/sunshine144/solar-nightlight --enable
 ```
 
 ### Method 2: Standalone Systemd Service
 
 ```bash
-git clone https://github.com/sunshine144/hyprsunset-solar.git
-cd hyprsunset-solar
+git clone https://github.com/sunshine144/solar-nightlight.git
+cd solar-nightlight
 ./install.sh
 ```
 
@@ -44,12 +44,12 @@ cd hyprsunset-solar
 Inspect live solar times, current phase, target temperature, and override status:
 
 ```bash
-hyprsunset-solar --status
+solar-nightlight --status
 ```
 
 Output:
 ```text
---- hyprsunset-solar Status ---
+--- solar-nightlight Status ---
 Location:           Washington, District of Columbia (38.9072, -77.0369)
 Current Local Time: 2026-08-30 14:00:11
 Dawn (Civil):       06:08:42
@@ -66,13 +66,13 @@ Manual Override:    Inactive
 
 ```bash
 # Custom night temperature (e.g. extra warm 3500K)
-hyprsunset-solar --night-temp 3500
+solar-nightlight --night-temp 3500
 
 # Custom transition window (e.g. 60 minutes)
-hyprsunset-solar --transition-mins 60
+solar-nightlight --transition-mins 60
 
 # Force reset any manual overrides and reapply solar target
-hyprsunset-solar --force
+solar-nightlight --force
 ```
 
 ---
@@ -81,13 +81,13 @@ hyprsunset-solar --force
 
 ```bash
 # View live logs
-journalctl --user -u hyprsunset-solar -f
+journalctl --user -u solar-nightlight -f
 
 # Restart daemon
-systemctl --user restart hyprsunset-solar
+systemctl --user restart solar-nightlight
 
 # Stop daemon
-systemctl --user stop hyprsunset-solar
+systemctl --user stop solar-nightlight
 ```
 
 ---
