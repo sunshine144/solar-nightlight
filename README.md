@@ -21,6 +21,16 @@ Written in pure standard-library Python 3 with **zero external dependencies**.
 
 ## Installation
 
+### Method 1: Omarchy Plugin (Recommended)
+
+Install and enable directly via Omarchy's plugin manager:
+
+```bash
+omarchy plugin add https://github.com/sunshine144/hyprsunset-solar --enable
+```
+
+### Method 2: Standalone Systemd Service
+
 ```bash
 git clone https://github.com/sunshine144/hyprsunset-solar.git
 cd hyprsunset-solar
