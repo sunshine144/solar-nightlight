@@ -343,12 +343,22 @@ def run_daemon(args):
             current_actual_temp = get_hyprsunset_temp()
 
             # Check if user manually changed temperature
-            if current_actual_temp is not None and last_set_temp is not None:
-                if abs(current_actual_temp - last_set_temp) > 80:
+            if current_actual_temp is not None:
+                compare_temp = last_set_temp if last_set_temp is not None else target_temp
+                if abs(current_actual_temp - compare_temp) > 80:
                     if not override_active:
                         print(f"[solar-nightlight] Detected manual override to {current_actual_temp}K (phase: {phase}). Auto-adjustment paused.")
                         override_active = True
                         override_phase = phase
+                        save_state({
+                            "override_active": True,
+                            "override_phase": phase,
+                            "last_set_temp": last_set_temp,
+                            "current_phase": phase,
+                            "target_temp": target_temp,
+                            "actual_temp": current_actual_temp,
+                            "updated_at": time.time()
+                        })
 
             # If override is active, check if solar phase has changed to reset it
             if override_active:
@@ -356,6 +366,15 @@ def run_daemon(args):
                     print(f"[solar-nightlight] Phase changed from {override_phase} to {phase}. Clearing manual override.")
                     override_active = False
                     override_phase = None
+                    save_state({
+                        "override_active": False,
+                        "override_phase": None,
+                        "last_set_temp": last_set_temp,
+                        "current_phase": phase,
+                        "target_temp": target_temp,
+                        "actual_temp": current_actual_temp,
+                        "updated_at": time.time()
+                    })
                 else:
                     time.sleep(args.interval)
                     continue
@@ -372,6 +391,7 @@ def run_daemon(args):
                 "last_set_temp": last_set_temp,
                 "current_phase": phase,
                 "target_temp": target_temp,
+                "actual_temp": current_actual_temp,
                 "updated_at": time.time()
             })
 
@@ -394,6 +414,15 @@ def print_status(args):
     current_actual = get_hyprsunset_temp()
     state = load_state()
 
+    is_override = state.get("override_active", False)
+    if not is_override and current_actual is not None and abs(current_actual - target_temp) > 80:
+        is_override = True
+        override_text = f"Active ({current_actual}K, Target: {target_temp}K)"
+    elif is_override:
+        override_text = f"Active (Phase: {state.get('override_phase', phase)}, Temp: {current_actual}K)"
+    else:
+        override_text = "Inactive"
+
     print("--- solar-nightlight Status ---")
     print(f"Location:           {loc.get('city', 'Unknown')}, {loc.get('region', '')} ({lat:.4f}, {lon:.4f})")
     print(f"Current Local Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}")
@@ -404,7 +433,7 @@ def print_status(args):
     print(f"Solar Phase:        {phase}")
     print(f"Target Temperature: {target_temp}K")
     print(f"Actual hyprsunset:  {current_actual}K" if current_actual else "Actual hyprsunset:  Not Running / Unknown")
-    print(f"Manual Override:    {'Active (Phase: ' + str(state.get('override_phase')) + ')' if state.get('override_active') else 'Inactive'}")
+    print(f"Manual Override:    {override_text}")
 
 
 def main():
