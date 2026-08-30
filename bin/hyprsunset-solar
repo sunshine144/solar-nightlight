@@ -1,0 +1,434 @@
+#!/usr/bin/env python3
+"""
+hyprsunset-solar - Astronomical Solar Nightlight Daemon for Hyprland / Omarchy
+Calculates real-time sunrise, sunset, and twilight times based on geolocation
+and smoothly shifts hyprsunset color temperature between day and night.
+"""
+
+import os
+import sys
+import math
+import time
+import json
+import argparse
+import subprocess
+import urllib.request
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+
+CONFIG_DIR = Path.home() / ".config" / "hyprsunset-solar"
+CACHE_DIR = Path.home() / ".cache" / "hyprsunset-solar"
+LOCATION_CACHE_FILE = CACHE_DIR / "location.json"
+STATE_FILE = CACHE_DIR / "state.json"
+
+DEFAULT_DAY_TEMP = 6500
+DEFAULT_NIGHT_TEMP = 4000
+DEFAULT_TRANSITION_MINUTES = 45
+DEFAULT_INTERVAL_SECONDS = 15
+
+# Fallback coordinates (Central FL / default fallback if completely offline on first run)
+FALLBACK_LOCATION = {
+    "lat": 28.5423,
+    "lon": -81.5911,
+    "city": "Winter Garden",
+    "region": "Florida"
+}
+
+
+def ensure_dirs():
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def fetch_ip_location():
+    """Attempts to discover location via IP geolocation service."""
+    endpoints = [
+        "http://ip-api.com/json/?fields=status,message,country,regionName,city,lat,lon,timezone",
+        "https://ipapi.co/json/"
+    ]
+    for ep in endpoints:
+        try:
+            req = urllib.request.Request(ep, headers={"User-Agent": "hyprsunset-solar/1.0"})
+            with urllib.request.urlopen(req, timeout=5) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+                if "lat" in data and "lon" in data:
+                    return {
+                        "lat": float(data["lat"]),
+                        "lon": float(data["lon"]),
+                        "city": data.get("city", ""),
+                        "region": data.get("regionName", data.get("region", "")),
+                        "timestamp": time.time()
+                    }
+                elif "latitude" in data and "longitude" in data:
+                    return {
+                        "lat": float(data["latitude"]),
+                        "lon": float(data["longitude"]),
+                        "city": data.get("city", ""),
+                        "region": data.get("region", ""),
+                        "timestamp": time.time()
+                    }
+        except Exception:
+            continue
+    return None
+
+
+def get_location(override_lat=None, override_lon=None):
+    """Retrieves location from override args, cache, or auto-detection."""
+    ensure_dirs()
+    if override_lat is not None and override_lon is not None:
+        return {
+            "lat": override_lat,
+            "lon": override_lon,
+            "city": "Custom",
+            "region": "Manual Coordinates",
+            "timestamp": time.time()
+        }
+
+    # Check cache
+    if LOCATION_CACHE_FILE.exists():
+        try:
+            with open(LOCATION_CACHE_FILE, "r") as f:
+                cached = json.load(f)
+                if "lat" in cached and "lon" in cached:
+                    cache_age = time.time() - cached.get("timestamp", 0)
+                    if cache_age < 30 * 86400:
+                        return cached
+        except Exception:
+            pass
+
+    # Try fetching fresh location
+    fresh = fetch_ip_location()
+    if fresh:
+        try:
+            with open(LOCATION_CACHE_FILE, "w") as f:
+                json.dump(fresh, f, indent=2)
+        except Exception:
+            pass
+        return fresh
+
+    # If offline, use cached even if old, or fallback
+    if LOCATION_CACHE_FILE.exists():
+        try:
+            with open(LOCATION_CACHE_FILE, "r") as f:
+                cached = json.load(f)
+                if "lat" in cached and "lon" in cached:
+                    return cached
+        except Exception:
+            pass
+
+    return FALLBACK_LOCATION
+
+
+def compute_solar_times(lat, lon, dt_utc=None):
+    """
+    Computes astronomical solar event times (UTC) using standard NOAA equations.
+    """
+    if dt_utc is None:
+        dt_utc = datetime.now(timezone.utc)
+
+    day_of_year = dt_utc.timetuple().tm_yday
+    # Fractional year in radians
+    gamma = 2 * math.pi / 365 * (day_of_year - 1 + (dt_utc.hour - 12) / 24)
+
+    # Equation of time in minutes
+    eqtime = 229.18 * (
+        0.000075
+        + 0.001868 * math.cos(gamma)
+        - 0.032077 * math.sin(gamma)
+        - 0.014615 * math.cos(2 * gamma)
+        - 0.040849 * math.sin(2 * gamma)
+    )
+
+    # Solar declination angle in radians
+    decl = (
+        0.006918
+        - 0.399912 * math.cos(gamma)
+        + 0.070257 * math.sin(gamma)
+        - 0.006758 * math.cos(2 * gamma)
+        + 0.000907 * math.sin(2 * gamma)
+        - 0.002697 * math.cos(3 * gamma)
+        + 0.00148 * math.sin(3 * gamma)
+    )
+
+    lat_rad = math.radians(lat)
+
+    def calc_rise_set_minutes(zenith_deg):
+        zenith_rad = math.radians(zenith_deg)
+        cos_ha = (math.cos(zenith_rad) - math.sin(lat_rad) * math.sin(decl)) / (
+            math.cos(lat_rad) * math.cos(decl)
+        )
+        if cos_ha > 1.0 or cos_ha < -1.0:
+            return None, None
+        ha_deg = math.degrees(math.acos(cos_ha))
+        rise_m = 720 - 4 * (lon + ha_deg) - eqtime
+        set_m = 720 - 4 * (lon - ha_deg) - eqtime
+        return rise_m, set_m
+
+    dawn_m, dusk_m = calc_rise_set_minutes(96.0)     # Civil twilight
+    rise_m, set_m = calc_rise_set_minutes(90.833)   # Official sunrise/sunset
+
+    def to_datetime(minutes):
+        if minutes is None:
+            return None
+        base = datetime(dt_utc.year, dt_utc.month, dt_utc.day, tzinfo=timezone.utc)
+        return base + timedelta(minutes=minutes)
+
+    return {
+        "dawn": to_datetime(dawn_m),
+        "sunrise": to_datetime(rise_m),
+        "sunset": to_datetime(set_m),
+        "dusk": to_datetime(dusk_m),
+    }
+
+
+def calculate_current_target(lat, lon, day_temp, night_temp, transition_mins, now_utc=None):
+    """
+    Determines current solar phase and smoothly interpolated target temperature.
+    """
+    if now_utc is None:
+        now_utc = datetime.now(timezone.utc)
+
+    today_times = compute_solar_times(lat, lon, now_utc)
+    sunrise = today_times["sunrise"]
+    sunset = today_times["sunset"]
+
+    if not sunrise or not sunset:
+        return "DAY", day_temp, today_times
+
+    trans_half = timedelta(minutes=transition_mins / 2.0)
+    dawn_start = sunrise - trans_half
+    dawn_end = sunrise + trans_half
+    dusk_start = sunset - trans_half
+    dusk_end = sunset + trans_half
+
+    if now_utc < dawn_start:
+        return "NIGHT", night_temp, today_times
+    elif dawn_start <= now_utc <= dawn_end:
+        total_seconds = (dawn_end - dawn_start).total_seconds()
+        elapsed = (now_utc - dawn_start).total_seconds()
+        progress = max(0.0, min(1.0, elapsed / total_seconds))
+        weight = (1.0 - math.cos(math.pi * progress)) / 2.0
+        target = round(night_temp + weight * (day_temp - night_temp))
+        return "SUNRISE_TRANSITION", target, today_times
+    elif dawn_end < now_utc < dusk_start:
+        return "DAY", day_temp, today_times
+    elif dusk_start <= now_utc <= dusk_end:
+        total_seconds = (dusk_end - dusk_start).total_seconds()
+        elapsed = (now_utc - dusk_start).total_seconds()
+        progress = max(0.0, min(1.0, elapsed / total_seconds))
+        weight = (1.0 - math.cos(math.pi * progress)) / 2.0
+        target = round(day_temp - weight * (day_temp - night_temp))
+        return "SUNSET_TRANSITION", target, today_times
+    else:
+        return "NIGHT", night_temp, today_times
+
+
+def get_hyprsunset_temp():
+    """Queries currently applied temperature from hyprsunset."""
+    try:
+        res = subprocess.run(
+            ["hyprctl", "hyprsunset", "temperature"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        if res.returncode == 0:
+            for word in res.stdout.split():
+                if word.isdigit():
+                    return int(word)
+    except Exception:
+        pass
+    return None
+
+
+def ensure_hyprsunset_running():
+    """Ensures hyprsunset is running and its IPC socket is responsive."""
+    try:
+        res = subprocess.run(
+            ["hyprctl", "hyprsunset", "temperature"],
+            capture_output=True,
+            text=True,
+            timeout=2
+        )
+        combined = (res.stdout or "") + " " + (res.stderr or "")
+        if res.returncode == 0 and "Couldn't connect" not in combined and "couldn't connect" not in combined.lower():
+            return
+    except Exception:
+        pass
+
+    # If IPC is unreachable, broken, or process died, kill stale instances and restart
+    try:
+        subprocess.run(["killall", "-9", "hyprsunset"], capture_output=True)
+        time.sleep(0.2)
+        subprocess.Popen(
+            ["uwsm-app", "--", "hyprsunset"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True
+        )
+        time.sleep(1.0)
+    except Exception:
+        try:
+            subprocess.Popen(
+                ["hyprsunset"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            time.sleep(1.0)
+        except Exception:
+            pass
+
+
+def apply_temperature(target_temp):
+    """Sets hyprsunset temperature via hyprctl."""
+    ensure_hyprsunset_running()
+    try:
+        subprocess.run(
+            ["hyprctl", "hyprsunset", "temperature", str(target_temp)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=True
+        )
+        subprocess.run(
+            ["omarchy-shell", "-q", "nightlight", "refresh"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL
+        )
+        return True
+    except Exception:
+        return False
+
+
+def save_state(state):
+    ensure_dirs()
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception:
+        pass
+
+
+def load_state():
+    if STATE_FILE.exists():
+        try:
+            with open(STATE_FILE, "r") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+
+def run_daemon(args):
+    loc = get_location(args.lat, args.lon)
+    lat = loc["lat"]
+    lon = loc["lon"]
+
+    print(f"[hyprsunset-solar] Running with location: {loc.get('city', 'Unknown')}, {loc.get('region', '')} ({lat:.4f}, {lon:.4f})")
+    print(f"[hyprsunset-solar] Config: Day={args.day_temp}K, Night={args.night_temp}K, Transition={args.transition_mins}m, Interval={args.interval}s")
+
+    state = load_state()
+    override_active = state.get("override_active", False)
+    override_phase = state.get("override_phase", None)
+    last_set_temp = state.get("last_set_temp", None)
+
+    while True:
+        try:
+            ensure_hyprsunset_running()
+            now_utc = datetime.now(timezone.utc)
+            phase, target_temp, times = calculate_current_target(
+                lat, lon, args.day_temp, args.night_temp, args.transition_mins, now_utc
+            )
+
+            current_actual_temp = get_hyprsunset_temp()
+
+            # Check if user manually changed temperature
+            if current_actual_temp is not None and last_set_temp is not None:
+                if abs(current_actual_temp - last_set_temp) > 80:
+                    if not override_active:
+                        print(f"[hyprsunset-solar] Detected manual override to {current_actual_temp}K (phase: {phase}). Auto-adjustment paused.")
+                        override_active = True
+                        override_phase = phase
+
+            # If override is active, check if solar phase has changed to reset it
+            if override_active:
+                if override_phase and phase != override_phase:
+                    print(f"[hyprsunset-solar] Phase changed from {override_phase} to {phase}. Clearing manual override.")
+                    override_active = False
+                    override_phase = None
+                else:
+                    time.sleep(args.interval)
+                    continue
+
+            # Apply target temp if needed (threshold 20K to reduce hyprctl calls during micro-steps)
+            if current_actual_temp is None or abs(current_actual_temp - target_temp) >= 20:
+                if apply_temperature(target_temp):
+                    last_set_temp = target_temp
+                    print(f"[hyprsunset-solar] Applied {target_temp}K (Phase: {phase})")
+
+            save_state({
+                "override_active": override_active,
+                "override_phase": override_phase,
+                "last_set_temp": last_set_temp,
+                "current_phase": phase,
+                "target_temp": target_temp,
+                "updated_at": time.time()
+            })
+
+        except Exception as err:
+            print(f"[hyprsunset-solar] Error in loop tick: {err}", file=sys.stderr)
+
+        time.sleep(args.interval)
+
+
+def print_status(args):
+    loc = get_location(args.lat, args.lon)
+    lat = loc["lat"]
+    lon = loc["lon"]
+    now_utc = datetime.now(timezone.utc)
+    local_tz = datetime.now().astimezone().tzinfo
+
+    phase, target_temp, times = calculate_current_target(
+        lat, lon, args.day_temp, args.night_temp, args.transition_mins, now_utc
+    )
+    current_actual = get_hyprsunset_temp()
+    state = load_state()
+
+    print("--- hyprsunset-solar Status ---")
+    print(f"Location:           {loc.get('city', 'Unknown')}, {loc.get('region', '')} ({lat:.4f}, {lon:.4f})")
+    print(f"Current Local Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S %Z')}")
+    print(f"Dawn (Civil):       {times['dawn'].astimezone(local_tz).strftime('%H:%M:%S') if times['dawn'] else 'N/A'}")
+    print(f"Sunrise:            {times['sunrise'].astimezone(local_tz).strftime('%H:%M:%S') if times['sunrise'] else 'N/A'}")
+    print(f"Sunset:             {times['sunset'].astimezone(local_tz).strftime('%H:%M:%S') if times['sunset'] else 'N/A'}")
+    print(f"Dusk (Civil):       {times['dusk'].astimezone(local_tz).strftime('%H:%M:%S') if times['dusk'] else 'N/A'}")
+    print(f"Solar Phase:        {phase}")
+    print(f"Target Temperature: {target_temp}K")
+    print(f"Actual hyprsunset:  {current_actual}K" if current_actual else "Actual hyprsunset:  Not Running / Unknown")
+    print(f"Manual Override:    {'Active (Phase: ' + str(state.get('override_phase')) + ')' if state.get('override_active') else 'Inactive'}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Astronomical solar nightlight daemon for hyprsunset")
+    parser.add_argument("--status", action="store_true", help="Show current solar times, phase, and temperature status")
+    parser.add_argument("--day-temp", type=int, default=DEFAULT_DAY_TEMP, help=f"Daytime color temperature (default: {DEFAULT_DAY_TEMP}K)")
+    parser.add_argument("--night-temp", type=int, default=DEFAULT_NIGHT_TEMP, help=f"Nighttime color temperature (default: {DEFAULT_NIGHT_TEMP}K)")
+    parser.add_argument("--transition-mins", type=int, default=DEFAULT_TRANSITION_MINUTES, help=f"Transition window in minutes (default: {DEFAULT_TRANSITION_MINUTES}m)")
+    parser.add_argument("--interval", type=int, default=DEFAULT_INTERVAL_SECONDS, help=f"Check interval in seconds (default: {DEFAULT_INTERVAL_SECONDS}s)")
+    parser.add_argument("--lat", type=float, default=None, help="Latitude override")
+    parser.add_argument("--lon", type=float, default=None, help="Longitude override")
+    parser.add_argument("--force", action="store_true", help="Force immediate reset of manual overrides")
+
+    args = parser.parse_args()
+
+    if args.force:
+        save_state({})
+        print("[hyprsunset-solar] Reset state and manual overrides.")
+
+    if args.status:
+        print_status(args)
+    else:
+        run_daemon(args)
+
+
+if __name__ == "__main__":
+    main()
