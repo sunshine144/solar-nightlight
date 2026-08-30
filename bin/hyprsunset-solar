@@ -28,10 +28,10 @@ DEFAULT_INTERVAL_SECONDS = 15
 
 # Fallback coordinates (Central FL / default fallback if completely offline on first run)
 FALLBACK_LOCATION = {
-    "lat": 28.5423,
-    "lon": -81.5911,
-    "city": "Winter Garden",
-    "region": "Florida"
+    "lat": 38.9072,
+    "lon": -77.0369,
+    "city": "Washington",
+    "region": "District of Columbia"
 }
 
 
