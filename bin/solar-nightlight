@@ -7,9 +7,11 @@ and smoothly shifts hyprsunset color temperature between day and night.
 
 import os
 import sys
+import stat
 import math
 import time
 import json
+import tempfile
 import argparse
 import subprocess
 import urllib.request
@@ -20,6 +22,9 @@ CONFIG_DIR = Path.home() / ".config" / "solar-nightlight"
 CACHE_DIR = Path.home() / ".cache" / "solar-nightlight"
 LOCATION_CACHE_FILE = CACHE_DIR / "location.json"
 STATE_FILE = CACHE_DIR / "state.json"
+
+MAX_HTTP_BYTES = 64 * 1024
+MAX_FILE_BYTES = 64 * 1024
 
 DEFAULT_DAY_TEMP = 6500
 DEFAULT_NIGHT_TEMP = 4000
@@ -40,8 +45,53 @@ def ensure_dirs():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def safe_read_json(file_path: Path, max_bytes: int = MAX_FILE_BYTES):
+    """Safely reads a JSON file avoiding symlink attacks and FIFO blocks."""
+    try:
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(str(file_path), flags)
+        try:
+            st = os.fstat(fd)
+            if not stat.S_ISREG(st.st_mode):
+                return None
+            if st.st_size > max_bytes:
+                return None
+            content = os.read(fd, max_bytes + 1)
+            if len(content) > max_bytes:
+                return None
+            return json.loads(content.decode("utf-8"))
+        finally:
+            os.close(fd)
+    except Exception:
+        return None
+
+
+def safe_write_json(file_path: Path, data: dict):
+    """Atomically writes JSON to file via an exclusive temporary file in the same directory."""
+    ensure_dirs()
+    parent_dir = file_path.parent
+    try:
+        content_bytes = json.dumps(data, indent=2).encode("utf-8")
+        temp_fd, temp_path = tempfile.mkstemp(prefix=f".{file_path.name}.", dir=parent_dir)
+        try:
+            with os.fdopen(temp_fd, "wb") as f:
+                f.write(content_bytes)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_path, file_path)
+        except Exception:
+            if os.path.exists(temp_path):
+                try:
+                    os.unlink(temp_path)
+                except Exception:
+                    pass
+            raise
+    except Exception:
+        pass
+
+
 def fetch_ip_location():
-    """Attempts to discover location via IP geolocation service."""
+    """Attempts to discover location via IP geolocation service with bounded response reads."""
     endpoints = [
         "http://ip-api.com/json/?fields=status,message,country,regionName,city,lat,lon,timezone",
         "https://ipapi.co/json/"
@@ -50,7 +100,10 @@ def fetch_ip_location():
         try:
             req = urllib.request.Request(ep, headers={"User-Agent": "solar-nightlight/1.0"})
             with urllib.request.urlopen(req, timeout=5) as resp:
-                data = json.loads(resp.read().decode("utf-8"))
+                raw_bytes = resp.read(MAX_HTTP_BYTES + 1)
+                if len(raw_bytes) > MAX_HTTP_BYTES:
+                    continue
+                data = json.loads(raw_bytes.decode("utf-8"))
                 if "lat" in data and "lon" in data:
                     return {
                         "lat": float(data["lat"]),
@@ -85,38 +138,25 @@ def get_location(override_lat=None, override_lon=None):
         }
 
     # Check cache
-    if LOCATION_CACHE_FILE.exists():
-        try:
-            with open(LOCATION_CACHE_FILE, "r") as f:
-                cached = json.load(f)
-                if "lat" in cached and "lon" in cached:
-                    cache_age = time.time() - cached.get("timestamp", 0)
-                    if cache_age < 30 * 86400:
-                        return cached
-        except Exception:
-            pass
+    cached = safe_read_json(LOCATION_CACHE_FILE)
+    if cached and "lat" in cached and "lon" in cached:
+        cache_age = time.time() - cached.get("timestamp", 0)
+        if cache_age < 30 * 86400:
+            return cached
 
     # Try fetching fresh location
     fresh = fetch_ip_location()
     if fresh:
-        try:
-            with open(LOCATION_CACHE_FILE, "w") as f:
-                json.dump(fresh, f, indent=2)
-        except Exception:
-            pass
+        safe_write_json(LOCATION_CACHE_FILE, fresh)
         return fresh
 
     # If offline, use cached even if old, or fallback
-    if LOCATION_CACHE_FILE.exists():
-        try:
-            with open(LOCATION_CACHE_FILE, "r") as f:
-                cached = json.load(f)
-                if "lat" in cached and "lon" in cached:
-                    return cached
-        except Exception:
-            pass
+    cached = safe_read_json(LOCATION_CACHE_FILE)
+    if cached and "lat" in cached and "lon" in cached:
+        return cached
 
     return FALLBACK_LOCATION
+
 
 
 def compute_solar_times(lat, lon, dt_utc=None):
@@ -301,22 +341,13 @@ def apply_temperature(target_temp):
 
 
 def save_state(state):
-    ensure_dirs()
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump(state, f, indent=2)
-    except Exception:
-        pass
+    safe_write_json(STATE_FILE, state)
 
 
 def load_state():
-    if STATE_FILE.exists():
-        try:
-            with open(STATE_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {}
+    state = safe_read_json(STATE_FILE)
+    return state if isinstance(state, dict) else {}
+
 
 
 def run_daemon(args):
