@@ -120,37 +120,47 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
 
+def _ipapi_worker(q):
+    import urllib.request, urllib.error, json, math, time
+    endpoint = "https://ipapi.co/json/"
+    try:
+        opener = urllib.request.build_opener(NoRedirectHandler())
+        req = urllib.request.Request(endpoint, headers={"User-Agent": "solar-nightlight/1.0"})
+        with opener.open(req, timeout=5) as resp:
+            raw_bytes = resp.read(MAX_HTTP_BYTES + 1)
+            if len(raw_bytes) > MAX_HTTP_BYTES: return
+            data = json.loads(raw_bytes.decode("utf-8"))
+            
+            lat = float(data.get("lat") or data.get("latitude") or 0)
+            lon = float(data.get("lon") or data.get("longitude") or 0)
+            city = str(data.get("city", ""))[:50]
+            region = str(data.get("regionName", data.get("region", "")))[:50]
+            
+            if math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180:
+                q.put({
+                    "lat": lat, "lon": lon, "city": city, "region": region, "timestamp": time.time()
+                })
+    except Exception:
+        pass
+
 def fetch_ip_location():
     """Attempts to discover location via HTTPS geolocation service with strict 5s deadline and response caps."""
-    import threading
-    result = {"data": None}
+    import multiprocessing
+    q = multiprocessing.Queue()
+    p = multiprocessing.Process(target=_ipapi_worker, args=(q,))
+    p.start()
+    p.join(timeout=5.0)
     
-    def worker():
-        endpoint = "https://ipapi.co/json/"
-        try:
-            opener = urllib.request.build_opener(NoRedirectHandler())
-            req = urllib.request.Request(endpoint, headers={"User-Agent": "solar-nightlight/1.0"})
-            with opener.open(req, timeout=5) as resp:
-                raw_bytes = resp.read(MAX_HTTP_BYTES + 1)
-                if len(raw_bytes) > MAX_HTTP_BYTES: return
-                data = json.loads(raw_bytes.decode("utf-8"))
-                
-                lat = float(data.get("lat") or data.get("latitude") or 0)
-                lon = float(data.get("lon") or data.get("longitude") or 0)
-                city = str(data.get("city", ""))[:50]
-                region = str(data.get("regionName", data.get("region", "")))[:50]
-                
-                if math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180:
-                    result["data"] = {
-                        "lat": lat, "lon": lon, "city": city, "region": region, "timestamp": time.time()
-                    }
-        except Exception:
-            pass
-
-    t = threading.Thread(target=worker)
-    t.start()
-    t.join(timeout=5.0)
-    return result["data"]
+    if p.is_alive():
+        p.terminate()
+        p.join(timeout=1.0)
+        if p.is_alive():
+            p.kill()
+            p.join()
+            
+    if not q.empty():
+        return q.get()
+    return None
 
 
 def get_location(override_lat=None, override_lon=None):
@@ -292,44 +302,78 @@ def calculate_current_target(lat, lon, day_temp, night_temp, transition_mins, no
 
 def run_bounded(cmd, timeout=2.0, max_bytes=1024):
     import select
+    import shutil
+    import signal
+    
+    cmd0 = shutil.which(cmd[0])
+    if not cmd0:
+        return -1, "", ""
+    cmd[0] = cmd0
+
     try:
-        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+            start_new_session=True
+        )
         os.set_blocking(proc.stdout.fileno(), False)
         os.set_blocking(proc.stderr.fileno(), False)
         
         out, err = "", ""
         end_time = time.time() + timeout
+        overflow = False
         
         while time.time() < end_time and proc.poll() is None:
             rem = end_time - time.time()
-            if rem <= 0: break
+            if rem <= 0:
+                break
             rlist, _, _ = select.select([proc.stdout, proc.stderr], [], [], rem)
             if proc.stdout in rlist:
-                chunk = proc.stdout.read(max_bytes - len(out))
-                if chunk: out += chunk
+                chunk = proc.stdout.read(max_bytes - len(out) + 1)
+                if chunk:
+                    out += chunk
+                    if len(out) > max_bytes:
+                        overflow = True
+                        break
             if proc.stderr in rlist:
-                chunk = proc.stderr.read(max_bytes - len(err))
-                if chunk: err += chunk
-            if len(out) >= max_bytes and len(err) >= max_bytes:
-                break
-                
-        if proc.poll() is None:
-            proc.terminate()
-            try: proc.wait(timeout=1)
+                chunk = proc.stderr.read(max_bytes - len(err) + 1)
+                if chunk:
+                    err += chunk
+                    if len(err) > max_bytes:
+                        overflow = True
+                        break
+                        
+        if proc.poll() is None or overflow:
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+                proc.wait(timeout=1)
             except Exception:
-                proc.kill()
-                proc.wait()
+                pass
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                    proc.wait(timeout=1)
+                except Exception:
+                    pass
+            if overflow:
+                return -1, "", "Overflow"
                 
-        try:
-            chunk = proc.stdout.read(max_bytes - len(out))
-            if chunk: out += chunk
-        except Exception: pass
-        
-        return proc.returncode, out, err
-    except Exception:
-        if 'proc' in locals():
-            try: proc.kill(); proc.wait()
+        if not overflow and proc.returncode is not None:
+            try:
+                chunk = proc.stdout.read(max_bytes - len(out) + 1)
+                if chunk:
+                    out += chunk
+                    if len(out) > max_bytes: return -1, "", "Overflow"
             except Exception: pass
+            
+        return proc.returncode if proc.returncode is not None else -1, out, err
+
+    except Exception:
+        if 'proc' in locals() and proc.poll() is None:
+            try:
+                os.killpg(proc.pid, signal.SIGKILL)
+                proc.wait(timeout=1)
+            except Exception:
+                pass
         return -1, "", ""
 
 
@@ -348,6 +392,8 @@ def get_hyprsunset_temp():
 def ensure_hyprsunset_running():
     """Ensures hyprsunset is running and its IPC socket is responsive."""
     global hyprsunset_proc
+    import shutil
+    import signal
     
     code, out, err = run_bounded(["hyprctl", "hyprsunset", "temperature"], timeout=2.0)
     combined = (out or "") + " " + (err or "")
@@ -357,22 +403,26 @@ def ensure_hyprsunset_running():
     # If IPC is unreachable, kill our tracked instance if it exists
     if hyprsunset_proc is not None:
         try:
-            hyprsunset_proc.terminate()
+            os.killpg(hyprsunset_proc.pid, signal.SIGTERM)
             hyprsunset_proc.wait(timeout=2)
         except Exception:
-            hyprsunset_proc.kill()
-            hyprsunset_proc.wait()
+            try:
+                os.killpg(hyprsunset_proc.pid, signal.SIGKILL)
+                hyprsunset_proc.wait()
+            except Exception: pass
         hyprsunset_proc = None
 
     # Spawn a new instance
     try:
-        hyprsunset_proc = subprocess.Popen(
-            ["hyprsunset"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            start_new_session=True
-        )
-        time.sleep(1.0)
+        cmd0 = shutil.which("hyprsunset")
+        if cmd0:
+            hyprsunset_proc = subprocess.Popen(
+                [cmd0],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True
+            )
+            time.sleep(1.0)
     except Exception:
         pass
 
