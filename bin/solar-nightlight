@@ -45,11 +45,25 @@ def ensure_dirs():
     CONFIG_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def get_cache_dir_fd():
+    CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(str(CACHE_DIR), os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    st = os.fstat(fd)
+    if st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o700:
+        os.close(fd)
+        raise RuntimeError("Cache directory is insecure")
+    return fd
+
+
 def safe_read_json(file_path: Path, max_bytes: int = MAX_FILE_BYTES):
-    """Safely reads a JSON file avoiding symlink attacks and FIFO blocks."""
+    """Safely reads a JSON file using dir-fd and O_NOFOLLOW to prevent symlink attacks."""
+    try:
+        dir_fd = get_cache_dir_fd()
+    except Exception:
+        return None
     try:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-        fd = os.open(str(file_path), flags)
+        fd = os.open(file_path.name, flags, dir_fd=dir_fd)
         try:
             st = os.fstat(fd)
             if not stat.S_ISREG(st.st_mode):
@@ -64,64 +78,65 @@ def safe_read_json(file_path: Path, max_bytes: int = MAX_FILE_BYTES):
             os.close(fd)
     except Exception:
         return None
+    finally:
+        os.close(dir_fd)
 
 
 def safe_write_json(file_path: Path, data: dict):
-    """Atomically writes JSON to file via an exclusive temporary file in the same directory."""
-    ensure_dirs()
-    parent_dir = file_path.parent
+    """Atomically writes JSON to file via an exclusive temporary file in the dir_fd."""
+    try:
+        dir_fd = get_cache_dir_fd()
+    except Exception:
+        return
     try:
         content_bytes = json.dumps(data, indent=2).encode("utf-8")
-        temp_fd, temp_path = tempfile.mkstemp(prefix=f".{file_path.name}.", dir=parent_dir)
+        temp_name = f".{file_path.name}.{os.getpid()}.{time.time()}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(temp_name, flags, 0o600, dir_fd=dir_fd)
         try:
-            with os.fdopen(temp_fd, "wb") as f:
-                f.write(content_bytes)
-                f.flush()
-                os.fsync(f.fileno())
-            os.replace(temp_path, file_path)
-        except Exception:
-            if os.path.exists(temp_path):
-                try:
-                    os.unlink(temp_path)
-                except Exception:
-                    pass
-            raise
+            os.write(fd, content_bytes)
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        os.rename(temp_name, file_path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
     except Exception:
         pass
+    finally:
+        os.close(dir_fd)
 
+class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
 
 def fetch_ip_location():
-    """Attempts to discover location via IP geolocation service with bounded response reads."""
-    endpoints = [
-        "http://ip-api.com/json/?fields=status,message,country,regionName,city,lat,lon,timezone",
-        "https://ipapi.co/json/"
-    ]
-    for ep in endpoints:
-        try:
-            req = urllib.request.Request(ep, headers={"User-Agent": "solar-nightlight/1.0"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
-                raw_bytes = resp.read(MAX_HTTP_BYTES + 1)
-                if len(raw_bytes) > MAX_HTTP_BYTES:
-                    continue
-                data = json.loads(raw_bytes.decode("utf-8"))
-                if "lat" in data and "lon" in data:
-                    return {
-                        "lat": float(data["lat"]),
-                        "lon": float(data["lon"]),
-                        "city": data.get("city", ""),
-                        "region": data.get("regionName", data.get("region", "")),
-                        "timestamp": time.time()
-                    }
-                elif "latitude" in data and "longitude" in data:
-                    return {
-                        "lat": float(data["latitude"]),
-                        "lon": float(data["longitude"]),
-                        "city": data.get("city", ""),
-                        "region": data.get("region", ""),
-                        "timestamp": time.time()
-                    }
-        except Exception:
-            continue
+    """Attempts to discover location via HTTPS geolocation service with bounded response reads and no redirects."""
+    endpoint = "https://ipapi.co/json/"
+    try:
+        opener = urllib.request.build_opener(NoRedirectHandler())
+        req = urllib.request.Request(endpoint, headers={"User-Agent": "solar-nightlight/1.0"})
+        with opener.open(req, timeout=5) as resp:
+            raw_bytes = resp.read(MAX_HTTP_BYTES + 1)
+            if len(raw_bytes) > MAX_HTTP_BYTES:
+                return None
+            data = json.loads(raw_bytes.decode("utf-8"))
+            if "lat" in data and "lon" in data:
+                return {
+                    "lat": float(data["lat"]),
+                    "lon": float(data["lon"]),
+                    "city": data.get("city", ""),
+                    "region": data.get("regionName", data.get("region", "")),
+                    "timestamp": time.time()
+                }
+            elif "latitude" in data and "longitude" in data:
+                return {
+                    "lat": float(data["latitude"]),
+                    "lon": float(data["longitude"]),
+                    "city": data.get("city", ""),
+                    "region": data.get("region", ""),
+                    "timestamp": time.time()
+                }
+    except Exception:
+        pass
     return None
 
 
@@ -263,82 +278,99 @@ def calculate_current_target(lat, lon, day_temp, night_temp, transition_mins, no
         return "NIGHT", night_temp, today_times
 
 
+hyprsunset_proc = None
+
 def get_hyprsunset_temp():
     """Queries currently applied temperature from hyprsunset."""
     try:
-        res = subprocess.run(
+        proc = subprocess.Popen(
             ["hyprctl", "hyprsunset", "temperature"],
-            capture_output=True,
-            text=True,
-            timeout=2
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True
         )
-        if res.returncode == 0:
-            for word in res.stdout.split():
+        stdout_data = proc.stdout.read(1024)
+        proc.stdout.close()
+        proc.wait(timeout=2)
+        if proc.returncode == 0 and stdout_data:
+            for word in stdout_data.split():
                 if word.isdigit():
                     return int(word)
     except Exception:
-        pass
+        if 'proc' in locals():
+            proc.kill()
+            proc.wait()
     return None
 
 
 def ensure_hyprsunset_running():
     """Ensures hyprsunset is running and its IPC socket is responsive."""
+    global hyprsunset_proc
     try:
-        res = subprocess.run(
+        proc = subprocess.Popen(
             ["hyprctl", "hyprsunset", "temperature"],
-            capture_output=True,
-            text=True,
-            timeout=2
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True
         )
-        combined = (res.stdout or "") + " " + (res.stderr or "")
-        if res.returncode == 0 and "Couldn't connect" not in combined and "couldn't connect" not in combined.lower():
+        stdout_data = proc.stdout.read(1024)
+        stderr_data = proc.stderr.read(1024)
+        proc.stdout.close()
+        proc.stderr.close()
+        proc.wait(timeout=2)
+        combined = (stdout_data or "") + " " + (stderr_data or "")
+        if proc.returncode == 0 and "couldn't connect" not in combined.lower():
             return
     except Exception:
-        pass
+        if 'proc' in locals():
+            proc.kill()
+            proc.wait()
 
-    # If IPC is unreachable, broken, or process died, kill stale instances and restart
+    # If IPC is unreachable, kill our tracked instance if it exists
+    if hyprsunset_proc is not None:
+        try:
+            hyprsunset_proc.terminate()
+            hyprsunset_proc.wait(timeout=2)
+        except Exception:
+            hyprsunset_proc.kill()
+            hyprsunset_proc.wait()
+        hyprsunset_proc = None
+
+    # Spawn a new instance
     try:
-        subprocess.run(["killall", "-9", "hyprsunset"], capture_output=True)
-        time.sleep(0.2)
-        subprocess.Popen(
-            ["uwsm-app", "--", "hyprsunset"],
+        hyprsunset_proc = subprocess.Popen(
+            ["hyprsunset"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             start_new_session=True
         )
         time.sleep(1.0)
     except Exception:
-        try:
-            subprocess.Popen(
-                ["hyprsunset"],
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                start_new_session=True
-            )
-            time.sleep(1.0)
-        except Exception:
-            pass
+        pass
 
 
 def apply_temperature(target_temp):
-    """Sets hyprsunset temperature via hyprctl."""
+    """Sets hyprsunset temperature via hyprctl with deadlines."""
     ensure_hyprsunset_running()
     try:
-        subprocess.run(
+        proc1 = subprocess.Popen(
             ["hyprctl", "hyprsunset", "temperature", str(target_temp)],
             stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=True
+            stderr=subprocess.DEVNULL
         )
-        subprocess.run(
+        proc1.wait(timeout=2)
+        
+        proc2 = subprocess.Popen(
             ["omarchy-shell", "-q", "nightlight", "refresh"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL
         )
+        proc2.wait(timeout=2)
         return True
     except Exception:
+        if 'proc1' in locals(): proc1.kill()
+        if 'proc2' in locals(): proc2.kill()
         return False
-
 
 def save_state(state):
     safe_write_json(STATE_FILE, state)
