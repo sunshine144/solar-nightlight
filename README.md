@@ -29,14 +29,6 @@ Install and enable directly via Omarchy's plugin manager:
 omarchy plugin add https://github.com/sunshine144/solar-nightlight --enable
 ```
 
-### Method 2: Standalone Systemd Service
-
-```bash
-git clone https://github.com/sunshine144/solar-nightlight.git
-cd solar-nightlight
-./install.sh
-```
-
 ---
 
 ## CLI Usage
