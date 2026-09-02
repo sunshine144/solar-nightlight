@@ -40,20 +40,32 @@ FALLBACK_LOCATION = {
 }
 
 
-def ensure_dirs():
-    CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
+
+def get_safe_dir_fd(base_path, components):
+    fd = os.open(base_path, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        for part in components:
+            try:
+                os.mkdir(part, 0o700, dir_fd=fd)
+            except FileExistsError:
+                pass
+            next_fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0), dir_fd=fd)
+            os.close(fd)
+            fd = next_fd
+    except Exception:
+        os.close(fd)
+        raise
+    return fd
 
 
 def get_cache_dir_fd():
-    CACHE_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd = os.open(str(CACHE_DIR), os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_NOFOLLOW", 0))
+    home = str(Path.home())
+    fd = get_safe_dir_fd(home, [".cache", "solar-nightlight"])
     st = os.fstat(fd)
     if st.st_uid != os.getuid() or stat.S_IMODE(st.st_mode) != 0o700:
         os.close(fd)
-        raise RuntimeError("Cache directory is insecure")
+        raise RuntimeError("Insecure cache directory")
     return fd
-
 
 def safe_read_json(file_path: Path, max_bytes: int = MAX_FILE_BYTES):
     """Safely reads a JSON file using dir-fd and O_NOFOLLOW to prevent symlink attacks."""
@@ -109,40 +121,40 @@ class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
         raise urllib.error.HTTPError(req.full_url, code, msg, headers, fp)
 
 def fetch_ip_location():
-    """Attempts to discover location via HTTPS geolocation service with bounded response reads and no redirects."""
-    endpoint = "https://ipapi.co/json/"
-    try:
-        opener = urllib.request.build_opener(NoRedirectHandler())
-        req = urllib.request.Request(endpoint, headers={"User-Agent": "solar-nightlight/1.0"})
-        with opener.open(req, timeout=5) as resp:
-            raw_bytes = resp.read(MAX_HTTP_BYTES + 1)
-            if len(raw_bytes) > MAX_HTTP_BYTES:
-                return None
-            data = json.loads(raw_bytes.decode("utf-8"))
-            if "lat" in data and "lon" in data:
-                return {
-                    "lat": float(data["lat"]),
-                    "lon": float(data["lon"]),
-                    "city": data.get("city", ""),
-                    "region": data.get("regionName", data.get("region", "")),
-                    "timestamp": time.time()
-                }
-            elif "latitude" in data and "longitude" in data:
-                return {
-                    "lat": float(data["latitude"]),
-                    "lon": float(data["longitude"]),
-                    "city": data.get("city", ""),
-                    "region": data.get("region", ""),
-                    "timestamp": time.time()
-                }
-    except Exception:
-        pass
-    return None
+    """Attempts to discover location via HTTPS geolocation service with strict 5s deadline and response caps."""
+    import threading
+    result = {"data": None}
+    
+    def worker():
+        endpoint = "https://ipapi.co/json/"
+        try:
+            opener = urllib.request.build_opener(NoRedirectHandler())
+            req = urllib.request.Request(endpoint, headers={"User-Agent": "solar-nightlight/1.0"})
+            with opener.open(req, timeout=5) as resp:
+                raw_bytes = resp.read(MAX_HTTP_BYTES + 1)
+                if len(raw_bytes) > MAX_HTTP_BYTES: return
+                data = json.loads(raw_bytes.decode("utf-8"))
+                
+                lat = float(data.get("lat") or data.get("latitude") or 0)
+                lon = float(data.get("lon") or data.get("longitude") or 0)
+                city = str(data.get("city", ""))[:50]
+                region = str(data.get("regionName", data.get("region", "")))[:50]
+                
+                if math.isfinite(lat) and math.isfinite(lon) and -90 <= lat <= 90 and -180 <= lon <= 180:
+                    result["data"] = {
+                        "lat": lat, "lon": lon, "city": city, "region": region, "timestamp": time.time()
+                    }
+        except Exception:
+            pass
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(timeout=5.0)
+    return result["data"]
 
 
 def get_location(override_lat=None, override_lon=None):
     """Retrieves location from override args, cache, or auto-detection."""
-    ensure_dirs()
     if override_lat is not None and override_lon is not None:
         return {
             "lat": override_lat,
@@ -278,53 +290,69 @@ def calculate_current_target(lat, lon, day_temp, night_temp, transition_mins, no
         return "NIGHT", night_temp, today_times
 
 
+def run_bounded(cmd, timeout=2.0, max_bytes=1024):
+    import select
+    try:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        os.set_blocking(proc.stdout.fileno(), False)
+        os.set_blocking(proc.stderr.fileno(), False)
+        
+        out, err = "", ""
+        end_time = time.time() + timeout
+        
+        while time.time() < end_time and proc.poll() is None:
+            rem = end_time - time.time()
+            if rem <= 0: break
+            rlist, _, _ = select.select([proc.stdout, proc.stderr], [], [], rem)
+            if proc.stdout in rlist:
+                chunk = proc.stdout.read(max_bytes - len(out))
+                if chunk: out += chunk
+            if proc.stderr in rlist:
+                chunk = proc.stderr.read(max_bytes - len(err))
+                if chunk: err += chunk
+            if len(out) >= max_bytes and len(err) >= max_bytes:
+                break
+                
+        if proc.poll() is None:
+            proc.terminate()
+            try: proc.wait(timeout=1)
+            except Exception:
+                proc.kill()
+                proc.wait()
+                
+        try:
+            chunk = proc.stdout.read(max_bytes - len(out))
+            if chunk: out += chunk
+        except Exception: pass
+        
+        return proc.returncode, out, err
+    except Exception:
+        if 'proc' in locals():
+            try: proc.kill(); proc.wait()
+            except Exception: pass
+        return -1, "", ""
+
+
 hyprsunset_proc = None
 
 def get_hyprsunset_temp():
     """Queries currently applied temperature from hyprsunset."""
-    try:
-        proc = subprocess.Popen(
-            ["hyprctl", "hyprsunset", "temperature"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True
-        )
-        stdout_data = proc.stdout.read(1024)
-        proc.stdout.close()
-        proc.wait(timeout=2)
-        if proc.returncode == 0 and stdout_data:
-            for word in stdout_data.split():
-                if word.isdigit():
-                    return int(word)
-    except Exception:
-        if 'proc' in locals():
-            proc.kill()
-            proc.wait()
+    code, out, _ = run_bounded(["hyprctl", "hyprsunset", "temperature"], timeout=2.0)
+    if code == 0 and out:
+        for word in out.split():
+            if word.isdigit():
+                return int(word)
     return None
 
 
 def ensure_hyprsunset_running():
     """Ensures hyprsunset is running and its IPC socket is responsive."""
     global hyprsunset_proc
-    try:
-        proc = subprocess.Popen(
-            ["hyprctl", "hyprsunset", "temperature"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True
-        )
-        stdout_data = proc.stdout.read(1024)
-        stderr_data = proc.stderr.read(1024)
-        proc.stdout.close()
-        proc.stderr.close()
-        proc.wait(timeout=2)
-        combined = (stdout_data or "") + " " + (stderr_data or "")
-        if proc.returncode == 0 and "couldn't connect" not in combined.lower():
-            return
-    except Exception:
-        if 'proc' in locals():
-            proc.kill()
-            proc.wait()
+    
+    code, out, err = run_bounded(["hyprctl", "hyprsunset", "temperature"], timeout=2.0)
+    combined = (out or "") + " " + (err or "")
+    if code == 0 and "couldn't connect" not in combined.lower():
+        return
 
     # If IPC is unreachable, kill our tracked instance if it exists
     if hyprsunset_proc is not None:
@@ -352,25 +380,12 @@ def ensure_hyprsunset_running():
 def apply_temperature(target_temp):
     """Sets hyprsunset temperature via hyprctl with deadlines."""
     ensure_hyprsunset_running()
-    try:
-        proc1 = subprocess.Popen(
-            ["hyprctl", "hyprsunset", "temperature", str(target_temp)],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        proc1.wait(timeout=2)
-        
-        proc2 = subprocess.Popen(
-            ["omarchy-shell", "-q", "nightlight", "refresh"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL
-        )
-        proc2.wait(timeout=2)
-        return True
-    except Exception:
-        if 'proc1' in locals(): proc1.kill()
-        if 'proc2' in locals(): proc2.kill()
-        return False
+    
+    code1, _, _ = run_bounded(["hyprctl", "hyprsunset", "temperature", str(target_temp)], timeout=2.0)
+    code2, _, _ = run_bounded(["omarchy-shell", "-q", "nightlight", "refresh"], timeout=2.0)
+    
+    return code1 == 0
+
 
 def save_state(state):
     safe_write_json(STATE_FILE, state)
