@@ -1,5 +1,7 @@
 # Solar Nightlight ☀️
 
+![Solar Nightlight](preview.png)
+
 > **Astronomical solar nightlight daemon for `hyprsunset` on Hyprland & Omarchy Linux.**
 
 `solar-nightlight` dynamically calculates your real-world astronomical sunrise, sunset, and civil twilight times based on your local geolocation, and smoothly eases screen color temperature between crisp daylight (`6500K`) and warm nightlight (`4000K`).
