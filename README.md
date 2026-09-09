@@ -8,6 +8,18 @@ Written in pure standard-library Python 3 with **zero external dependencies**.
 
 ---
 
+## What It Does
+Instead of an arbitrary clock timer that turns your screen suddenly orange, `solar-nightlight` uses real-world astronomical NOAA math to calculate exact sunrise, sunset, and twilight times for your local coordinates. 
+
+Over a 45-minute window at dawn and dusk, it gently ramps your display between crisp daylight (`6500K`) and warm nightlight (`4000K`) using smooth cosine easing—so gradual your eyes will never notice the change.
+
+## Who It's For
+* **Night Owls & Late Workers:** Reduces eye fatigue, headaches, and sleep disruption automatically without needing to remember to toggle night mode.
+* **Zero-Maintenance Minimalists:** Requires zero manual scheduling. It dynamically adjusts as daylight hours lengthen in summer and shorten in winter, completely offline.
+* **Anyone Disliking Sudden Color Jumps:** Eliminates the jarring, instant orange snap common in basic schedulers.
+
+---
+
 ## Features
 
 - ☀️ **Astronomical Solar Calculations**: Pure implementation of NOAA solar position equations calculating daily solar declination, civil dawn/dusk, and sunrise/sunset.
@@ -15,7 +27,7 @@ Written in pure standard-library Python 3 with **zero external dependencies**.
 - 🌊 **Smooth Cosine Transition**: Gently ramps color temperature over a 45-minute window during dawn and dusk using smoothstep easing, eliminating jarring screen color jumps.
 - 🔄 **Self-Healing IPC**: Continuously tests `hyprsunset` socket connectivity. Automatically cleans up stale or orphaned processes after Hyprland compositor reloads or sleep/wake cycles.
 - 🎛️ **Manual Override Aware**: Respects manual temperature adjustments made via the Omarchy bar, `omarchy toggle nightlight`, or custom keybindings until the next solar phase transition.
-- ⚙️ **Systemd Integration**: Runs as a standard user systemd service with automatic restarts and journal logging.
+- ⚙️ **Native Shell Service & Systemd**: Runs natively as an Omarchy background service (`Service.qml`) with automatic crash recovery, or as a standalone user systemd service for raw Hyprland setups.
 
 ---
 

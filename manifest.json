@@ -6,7 +6,7 @@
   "author": "sunshine144",
   "license": "MIT",
   "homepage": "https://github.com/sunshine144/solar-nightlight",
-  "description": "Astronomical solar nightlight scheduler daemon for hyprsunset with NOAA solar calculation math and smooth cosine transitions",
+  "description": "Automatically warms your screen at dusk and eases back to daylight at dawn based on real-world local sun times. Smooth, gradual transitions for zero eye strain.",
   "kinds": [
     "service"
   ],
