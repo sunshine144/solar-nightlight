@@ -37,10 +37,32 @@ Over a 45-minute window at dawn and dusk, it gently ramps your display between c
 
 ### Method 1: Omarchy Plugin (Recommended)
 
-Install and enable directly via Omarchy's plugin manager:
+For **Omarchy Linux** users, install and enable directly via Omarchy's plugin manager:
 
 ```bash
 omarchy plugin add https://github.com/sunshine144/solar-nightlight --enable
+```
+
+*Managed natively as a background service by Omarchy Shell (`Service.qml`). No systemd setup required.*
+
+---
+
+### Method 2: Standalone Hyprland (Non-Omarchy)
+
+For **standalone Hyprland** setups (Arch, Fedora, NixOS, etc.) using systemd:
+
+```bash
+# 1. Clone repository
+git clone https://github.com/sunshine144/solar-nightlight.git ~/.local/share/solar-nightlight
+
+# 2. Symlink executable to PATH
+mkdir -p ~/.local/bin ~/.config/systemd/user
+ln -sf ~/.local/share/solar-nightlight/bin/solar-nightlight ~/.local/bin/solar-nightlight
+
+# 3. Enable and start user service
+cp ~/.local/share/solar-nightlight/systemd/solar-nightlight.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now solar-nightlight.service
 ```
 
 ---
@@ -85,8 +107,19 @@ solar-nightlight --force
 
 ## Management & Service Logs
 
+### For Omarchy Plugin Users:
 ```bash
-# View live logs
+# Toggle plugin off or on
+omarchy plugin disable sunshine144.solar-nightlight
+omarchy plugin enable sunshine144.solar-nightlight
+
+# View live Omarchy shell logs
+journalctl --user -u omarchy-shell -f
+```
+
+### For Standalone Hyprland (systemd) Users:
+```bash
+# View live service logs
 journalctl --user -u solar-nightlight -f
 
 # Restart daemon
